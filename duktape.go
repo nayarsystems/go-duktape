@@ -13,11 +13,14 @@ package duktape
 #include "duk_print_alert.h"
 #include "duk_module_duktape.h"
 #include "duk_console.h"
+
 extern duk_ret_t goFunctionCall(duk_context *ctx);
 extern void goFinalizeCall(duk_context *ctx);
+
 */
 import "C"
 import (
+	goContext "context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -44,9 +47,12 @@ func (c *Context) transmute(p unsafe.Pointer) {
 // this is a pojo containing only the values of the Context
 type context struct {
 	sync.Mutex
-	duk_context *C.duk_context
-	fnIndex     *functionIndex
-	timerIndex  *timerIndex
+	duk_context             *C.duk_context
+	fnIndex                 *functionIndex
+	timerIndex              *timerIndex
+	fatalErrorHandler       func(dctx *Context, emsg string)
+	execTimeoutCheckHandler func(dctx *Context) bool
+	goCtx                   goContext.Context
 }
 
 // New returns plain initialized duktape context object
@@ -54,11 +60,12 @@ type context struct {
 func New() *Context {
 	d := &Context{
 		&context{
-			duk_context: C.duk_create_heap(nil, nil, nil, nil, nil),
-			fnIndex:     newFunctionIndex(),
-			timerIndex:  &timerIndex{},
+			fnIndex:    newFunctionIndex(),
+			timerIndex: &timerIndex{},
 		},
 	}
+	ctxPtr := contexts.add(d)
+	d.duk_context = C.duk_create_heap(nil, nil, nil, ctxPtr, nil)
 
 	ctx := d.duk_context
 	C.duk_logging_init(ctx, 0)
@@ -90,11 +97,12 @@ const FlagConsoleFlush = 1 << 1
 func NewWithFlags(flags *Flags) *Context {
 	d := &Context{
 		&context{
-			duk_context: C.duk_create_heap(nil, nil, nil, nil, nil),
-			fnIndex:     newFunctionIndex(),
-			timerIndex:  &timerIndex{},
+			fnIndex:    newFunctionIndex(),
+			timerIndex: &timerIndex{},
 		},
 	}
+	ctxPtr := contexts.add(d)
+	d.duk_context = C.duk_create_heap(nil, nil, nil, ctxPtr, nil)
 
 	ctx := d.duk_context
 	C.duk_logging_init(ctx, C.duk_uint_t(flags.Logging))
@@ -107,6 +115,22 @@ func NewWithFlags(flags *Flags) *Context {
 
 func contextFromPointer(ctx *C.duk_context) *Context {
 	return &Context{&context{duk_context: ctx}}
+}
+
+func (d *Context) SetExecTimeoutCheckHandler(fn func(dctx *Context) bool) {
+	d.execTimeoutCheckHandler = fn
+}
+
+func (d *Context) SetFatalErrorHandler(fn func(dctx *Context, emsg string)) {
+	d.fatalErrorHandler = fn
+}
+
+func (d *Context) SetGoContext(goCtx goContext.Context) {
+	d.goCtx = goCtx
+}
+
+func (d *Context) GetGoContext() goContext.Context {
+	return d.goCtx
 }
 
 // PushGlobalGoFunction push the given function into duktape global object
@@ -131,6 +155,7 @@ func (d *Context) PushGoFunction(fn func(*Context) int) int {
 	funPtr := d.fnIndex.add(fn)
 	ctxPtr := contexts.add(d)
 
+	// [ ... global ]
 	idx := d.PushCFunction((*[0]byte)(C.goFunctionCall), C.DUK_VARARGS)
 	d.PushCFunction((*[0]byte)(C.goFinalizeCall), 1)
 	d.PushPointer(funPtr)
@@ -167,6 +192,41 @@ func goFinalizeCall(cCtx *C.duk_context) {
 	d.transmute(unsafe.Pointer(ctx))
 
 	d.fnIndex.delete(funPtr)
+}
+
+//export goExecTimeoutCheck
+func goExecTimeoutCheck(userData unsafe.Pointer) C.duk_bool_t {
+	if userData == nil {
+		return 0
+	}
+	d := getCtx(userData)
+	var res C.duk_bool_t
+	if d != nil && d.execTimeoutCheckHandler != nil && d.execTimeoutCheckHandler(d) {
+		res = 1
+	} else {
+		res = 0
+	}
+	return res
+}
+
+//export goFatalErrorHandler
+func goFatalErrorHandler(userData unsafe.Pointer, msg *C.char) {
+	var d *Context
+	if userData == nil {
+		goto defaultPanicHandler
+	}
+	d = getCtx(userData)
+	if d != nil && d.fatalErrorHandler != nil {
+		d.fatalErrorHandler(d, C.GoString(msg))
+		return
+	}
+defaultPanicHandler:
+	panic(fmt.Sprintf("duktape fatal error: %s", C.GoString(msg)))
+
+}
+
+func getCtx(userData unsafe.Pointer) (d *Context) {
+	return contexts.get(userData)
 }
 
 func (d *Context) getFunctionPtrs() (unsafe.Pointer, *Context) {

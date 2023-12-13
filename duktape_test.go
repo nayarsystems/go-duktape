@@ -1,8 +1,11 @@
 package duktape
 
 import (
+	goContext "context"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	. "gopkg.in/check.v1"
 )
 
@@ -104,6 +107,23 @@ func (s *DuktapeSuite) TestMyAddTwo(c *C) {
 	c.Assert(err, IsNil)
 
 	c.Assert(s.ctx.GetNumber(-1), Equals, 5.0)
+}
+
+func (s *DuktapeSuite) TestExecTimeout(c *C) {
+	ctx, ctxCancel := goContext.WithCancel(goContext.Background())
+	s.ctx.SetGoContext(ctx)
+	s.ctx.SetExecTimeoutCheckHandler(func(dctx *Context) bool {
+		return dctx.GetGoContext().Err() != nil
+	})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := s.ctx.PevalString(`while(true){}`)
+		require.ErrorContains(c, err, "execution timeout")
+	}()
+	ctxCancel()
+	wg.Wait()
 }
 
 func (s *DuktapeSuite) TearDownTest(c *C) {
