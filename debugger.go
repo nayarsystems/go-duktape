@@ -251,6 +251,11 @@ func goDebugWriteFlushFunction(dData unsafe.Pointer) {
 	a.writeFlushFunc(a.uData)
 }
 
+// transmute replaces the value from Context with the value of pointer
+func (c *Context) transmute(p unsafe.Pointer) {
+	*c = *(*Context)(p)
+}
+
 //export goDebugRequestFunction
 func goDebugRequestFunction(ctx *C.duk_context, dData unsafe.Pointer, nvalues C.duk_idx_t) C.duk_idx_t {
 	a := ptrToAttachment(dData)

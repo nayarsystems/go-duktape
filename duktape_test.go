@@ -147,6 +147,18 @@ func (s *DuktapeSuite) TestPcallTimeout(c *C) {
 	wg.Wait()
 }
 
+func (s *DuktapeSuite) TestCreateContexts(c *C) {
+	dukCtx := New()
+	dukCtxFromMap := contexts.get(dukCtx.dukCtxCPtr)
+	require.Equal(c, dukCtx, dukCtxFromMap)
+	require.Len(c, contexts.ctxs, 2)
+	dukCtx.DestroyHeap()
+}
+
 func (s *DuktapeSuite) TearDownTest(c *C) {
+	dukCtx := contexts.get(s.ctx.dukCtxCPtr)
+	require.Equal(c, s.ctx, dukCtx)
+	require.Len(c, contexts.ctxs, 1)
 	s.ctx.DestroyHeap()
+	require.Len(c, contexts.ctxs, 0)
 }

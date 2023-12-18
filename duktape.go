@@ -35,21 +35,18 @@ const (
 	goContextPtrProp  = "\xff" + "goContextPtrProp"
 )
 
-type IdKey uint64
+type funcIdKey uint64
+type contextCPtr = unsafe.Pointer
 
 type Context struct {
 	*context
-}
-
-// transmute replaces the value from Context with the value of pointer
-func (c *Context) transmute(p unsafe.Pointer) {
-	*c = *(*Context)(p)
 }
 
 // this is a pojo containing only the values of the Context
 type context struct {
 	sync.Mutex
 	duk_context             *C.duk_context
+	dukCtxCPtr              contextCPtr
 	fnIndex                 *functionIndex
 	timerIndex              *timerIndex
 	fatalErrorHandler       func(dctx *Context, emsg string)
@@ -57,19 +54,30 @@ type context struct {
 	goCtx                   goContext.Context
 }
 
-func createDukContext(d *Context) *C.duk_context {
+func createDukContext(d *Context) {
 	// Create a unique identifier for this context.
-	contextIdentiferValue := contexts.add(d)
-	// Now we need to create a unsafe.Pointer from the contextIdentiferValue.
-	// Explanation:
-	// We need to create a unsafe.Pointer from the identififer because
-	// the duktape C code expects a void* (unsafe.Pointer in go).
-	// In other words, this is a hack to pass the identifier/key to C code, but the
-	// value is not used as a pointer.
-	// Get a unsafe.Pointer from uintptr is always a misuse of unsafe.Pointer, but in this case
-	// we are not using the pointer, we are using the value as a unique identifier.
-	contextIdentifier := unsafe.Pointer(uintptr(contextIdentiferValue))
-	return C.duk_create_heap(nil, nil, nil, contextIdentifier, nil)
+	//
+	// This identifier is used to identify the context in the C callbacks so that
+	// we can retrieve the Context object from the contexts map.
+	//
+	// Some C callbacks are called passing the context pointer as a void *
+	// which the Go runtime will convert to an unsafe.Pointer.
+	//
+	// Since the unsafe.Pointer of *Context can be updated by de GC we can't use it
+	// as the void * pointer. Instead, we need to create unsafe.Pointer that is not managed by the GC.
+	// We can achieve that by allocating a single byte of heap in C and storing the pointer to that byte
+	// in go as a unsafe.Pointer.
+	//
+	// This means that unsafe.Pointer will not point to the Context object, but will
+	// serve as a unique identifier for the context.
+	//
+	// We will store this C pointer (unsafe.Pointer in go) in the Context object.
+	if d.dukCtxCPtr != nil {
+		panic(fmt.Sprintf("context (%p) already exists", d))
+	}
+
+	d.dukCtxCPtr = contexts.add(d)
+	d.duk_context = C.duk_create_heap(nil, nil, nil, d.dukCtxCPtr, nil)
 }
 
 // New returns plain initialized duktape context object
@@ -81,12 +89,11 @@ func New() *Context {
 			timerIndex: &timerIndex{},
 		},
 	}
-	d.duk_context = createDukContext(d)
-	ctx := d.duk_context
-	C.duk_logging_init(ctx, 0)
-	C.duk_print_alert_init(ctx, 0)
-	C.duk_module_duktape_init(ctx)
-	C.duk_console_init(ctx, 0)
+	createDukContext(d)
+	C.duk_logging_init(d.duk_context, 0)
+	C.duk_print_alert_init(d.duk_context, 0)
+	C.duk_module_duktape_init(d.duk_context)
+	C.duk_console_init(d.duk_context, 0)
 
 	return d
 }
@@ -116,12 +123,11 @@ func NewWithFlags(flags *Flags) *Context {
 			timerIndex: &timerIndex{},
 		},
 	}
-	d.duk_context = createDukContext(d)
-	ctx := d.duk_context
-	C.duk_logging_init(ctx, C.duk_uint_t(flags.Logging))
-	C.duk_print_alert_init(ctx, C.duk_uint_t(flags.PrintAlert))
-	C.duk_module_duktape_init(ctx)
-	C.duk_console_init(ctx, C.duk_uint_t(flags.Console))
+	createDukContext(d)
+	C.duk_logging_init(d.duk_context, C.duk_uint_t(flags.Logging))
+	C.duk_print_alert_init(d.duk_context, C.duk_uint_t(flags.PrintAlert))
+	C.duk_module_duktape_init(d.duk_context)
+	C.duk_console_init(d.duk_context, C.duk_uint_t(flags.Console))
 
 	return d
 }
@@ -165,21 +171,19 @@ func (d *Context) PushGlobalGoFunction(name string, fn func(*Context) int) (int,
 // PushGoFunction push the given function into duktape stack, returns non-negative
 // index (relative to stack bottom) of the pushed function
 func (d *Context) PushGoFunction(fn func(*Context) int) int {
-	funPtr := d.fnIndex.add(fn)
-	ctxPtr := contexts.add(d)
+	funcId := d.fnIndex.add(fn)
 
-	// [ ... global ]
 	idx := d.PushCFunction((*[0]byte)(C.goFunctionCall), C.DUK_VARARGS)
 	d.PushCFunction((*[0]byte)(C.goFinalizeCall), 1)
-	d.PushNumber(float64(funPtr))
+	d.PushNumber(float64(funcId))
 	d.PutPropString(-2, goFunctionPtrProp)
-	d.PushNumber(float64(ctxPtr))
+	d.PushPointer(d.dukCtxCPtr)
 	d.PutPropString(-2, goContextPtrProp)
 	d.SetFinalizer(-2)
 
-	d.PushNumber(float64(funPtr))
+	d.PushNumber(float64(funcId))
 	d.PutPropString(-2, goFunctionPtrProp)
-	d.PushNumber(float64(ctxPtr))
+	d.PushPointer(d.dukCtxCPtr)
 	d.PutPropString(-2, goContextPtrProp)
 
 	return idx
@@ -189,8 +193,7 @@ func (d *Context) PushGoFunction(fn func(*Context) int) int {
 func goFunctionCall(cCtx *C.duk_context) C.duk_ret_t {
 	d := contextFromPointer(cCtx)
 
-	funPtr, ctx := d.getFunctionPtrs()
-	d.transmute(unsafe.Pointer(ctx))
+	funPtr, d := d.getFunctionPtrs()
 
 	result := d.fnIndex.get(funPtr)(d)
 
@@ -201,8 +204,7 @@ func goFunctionCall(cCtx *C.duk_context) C.duk_ret_t {
 func goFinalizeCall(cCtx *C.duk_context) {
 	d := contextFromPointer(cCtx)
 
-	funPtr, ctx := d.getFunctionPtrs()
-	d.transmute(unsafe.Pointer(ctx))
+	funPtr, d := d.getFunctionPtrs()
 
 	d.fnIndex.delete(funPtr)
 }
@@ -212,7 +214,7 @@ func goExecTimeoutCheck(userData unsafe.Pointer) C.duk_bool_t {
 	if userData == nil {
 		return 0
 	}
-	d := getCtx(userData)
+	d := contexts.get(userData)
 	var res C.duk_bool_t
 	if d != nil && d.execTimeoutCheckHandler != nil && d.execTimeoutCheckHandler(d) {
 		res = 1
@@ -228,7 +230,7 @@ func goFatalErrorHandler(userData unsafe.Pointer, msg *C.char) {
 	if userData == nil {
 		goto defaultPanicHandler
 	}
-	d = getCtx(userData)
+	d = contexts.get(userData)
 	if d != nil && d.fatalErrorHandler != nil {
 		d.fatalErrorHandler(d, C.GoString(msg))
 		return
@@ -238,27 +240,17 @@ defaultPanicHandler:
 
 }
 
-func getCtx(userData unsafe.Pointer) (d *Context) {
-	return contexts.get(IdKey(uintptr(userData)))
-}
-
-func (d *Context) getFunctionPtrs() (IdKey, *Context) {
+func (d *Context) getFunctionPtrs() (funcIdKey, *Context) {
 	d.PushCurrentFunction()
 	d.GetPropString(-1, goFunctionPtrProp)
-	funPtr := IdKey(d.GetNumber(-1))
+	funPtr := funcIdKey(d.GetNumber(-1))
 
 	d.Pop()
 
 	d.GetPropString(-1, goContextPtrProp)
-	ctx := contexts.get(IdKey(d.GetNumber(-1)))
+	ctx := contexts.get(d.GetPointer(-1))
 	d.Pop2()
 	return funPtr, ctx
-}
-
-// Destroy destroy all the references to the functions and freed the pointers
-func (d *Context) Destroy() {
-	d.fnIndex.destroy()
-	contexts.delete(d)
 }
 
 type Error struct {
@@ -314,8 +306,8 @@ func (t Type) String() string {
 }
 
 type functionIndex struct {
-	currentIndex IdKey
-	functions    map[IdKey]func(*Context) int
+	currentIndex funcIdKey
+	functions    map[funcIdKey]func(*Context) int
 	sync.RWMutex
 }
 
@@ -333,11 +325,11 @@ func (t *timerIndex) get() float64 {
 
 func newFunctionIndex() *functionIndex {
 	return &functionIndex{
-		functions: make(map[IdKey]func(*Context) int, 0),
+		functions: make(map[funcIdKey]func(*Context) int, 0),
 	}
 }
 
-func (i *functionIndex) add(fn func(*Context) int) IdKey {
+func (i *functionIndex) add(fn func(*Context) int) funcIdKey {
 	i.Lock()
 	ptr := i.currentIndex
 	i.currentIndex++
@@ -347,7 +339,7 @@ func (i *functionIndex) add(fn func(*Context) int) IdKey {
 	return ptr
 }
 
-func (i *functionIndex) get(ptr IdKey) func(*Context) int {
+func (i *functionIndex) get(ptr funcIdKey) func(*Context) int {
 	i.RLock()
 	fn := i.functions[ptr]
 	i.RUnlock()
@@ -355,7 +347,7 @@ func (i *functionIndex) get(ptr IdKey) func(*Context) int {
 	return fn
 }
 
-func (i *functionIndex) delete(ptr IdKey) {
+func (i *functionIndex) delete(ptr funcIdKey) {
 	i.Lock()
 	delete(i.functions, ptr)
 	i.Unlock()
@@ -371,52 +363,32 @@ func (i *functionIndex) destroy() {
 }
 
 type ctxIndex struct {
-	currentIndex IdKey
 	sync.RWMutex
-	ctxs map[IdKey]*Context
+	ctxs map[contextCPtr]*Context
 }
 
-func (ci *ctxIndex) add(ctx *Context) IdKey {
-
-	ci.RLock()
-	for ptr, ctxPtr := range ci.ctxs {
-		if ctxPtr == ctx {
-			ci.RUnlock()
-			return ptr
-		}
-	}
-	ci.RUnlock()
-
+func (ci *ctxIndex) add(d *Context) contextCPtr {
 	ci.Lock()
-	for ptr, ctxPtr := range ci.ctxs {
-		if ctxPtr == ctx {
-			ci.Unlock()
-			return ptr
-		}
-	}
-	ptr := ci.currentIndex
-	ci.currentIndex++
-	ci.ctxs[ptr] = ctx
-	ci.Unlock()
-
+	defer ci.Unlock()
+	ptr := C.malloc(1)
+	ci.ctxs[ptr] = d
 	return ptr
 }
 
-func (ci *ctxIndex) get(ptr IdKey) *Context {
+func (ci *ctxIndex) get(ptr contextCPtr) *Context {
 	ci.RLock()
+	defer ci.RUnlock()
 	ctx := ci.ctxs[ptr]
-	ci.RUnlock()
 	return ctx
 }
 
 func (ci *ctxIndex) delete(ctx *Context) {
 	ci.Lock()
-	for ptr, ctxPtr := range ci.ctxs {
-		if ctxPtr == ctx {
-			delete(ci.ctxs, ptr)
-			ci.Unlock()
-			return
-		}
+	defer ci.Unlock()
+	if _, ok := ci.ctxs[ctx.dukCtxCPtr]; ok {
+		delete(ci.ctxs, ctx.dukCtxCPtr)
+		C.free(ctx.dukCtxCPtr)
+		return
 	}
 	panic(fmt.Sprintf("context (%p) doesn't exist", ctx))
 }
@@ -425,6 +397,6 @@ var contexts *ctxIndex
 
 func init() {
 	contexts = &ctxIndex{
-		ctxs: make(map[IdKey]*Context),
+		ctxs: make(map[contextCPtr]*Context),
 	}
 }

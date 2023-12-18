@@ -307,11 +307,15 @@ func (d *Context) DefProp(objIndex int, flags uint) {
 	C.duk_def_prop(d.duk_context, C.duk_idx_t(objIndex), C.duk_uint_t(flags))
 }
 
+// Destroy destroy all the references to the functions, freed the pointers and
+// call C.duk_destroy_heap
 // See: http://duktape.org/api.html#duk_destroy_heap
 func (d *Context) DestroyHeap() {
 	d.Gc(0)
 	C.duk_destroy_heap(d.duk_context)
 	d.duk_context = nil
+	d.fnIndex.destroy()
+	contexts.delete(d)
 }
 
 // See: http://duktape.org/api.html#duk_dump_context_stderr
