@@ -109,7 +109,7 @@ func (s *DuktapeSuite) TestMyAddTwo(c *C) {
 	c.Assert(s.ctx.GetNumber(-1), Equals, 5.0)
 }
 
-func (s *DuktapeSuite) TestExecTimeout(c *C) {
+func (s *DuktapeSuite) TestPevalTimeout(c *C) {
 	ctx, ctxCancel := goContext.WithCancel(goContext.Background())
 	s.ctx.SetGoContext(ctx)
 	s.ctx.SetExecTimeoutCheckHandler(func(dctx *Context) bool {
@@ -121,6 +121,27 @@ func (s *DuktapeSuite) TestExecTimeout(c *C) {
 		defer wg.Done()
 		err := s.ctx.PevalString(`while(true){}`)
 		require.ErrorContains(c, err, "execution timeout")
+	}()
+	ctxCancel()
+	wg.Wait()
+}
+
+func (s *DuktapeSuite) TestPcallTimeout(c *C) {
+	ctx, ctxCancel := goContext.WithCancel(goContext.Background())
+	s.ctx.SetGoContext(ctx)
+	s.ctx.SetExecTimeoutCheckHandler(func(dctx *Context) bool {
+		return dctx.GetGoContext().Err() != nil
+	})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := s.ctx.PcompileString(CompileFunction, `function(){ while(true){} }`)
+		require.NoError(c, err)
+		res := s.ctx.Pcall(0)
+		require.Equal(c, ExecError, res)
+		errMsg := s.ctx.SafeToString(-1)
+		require.Contains(c, errMsg, "execution timeout")
 	}()
 	ctxCancel()
 	wg.Wait()
