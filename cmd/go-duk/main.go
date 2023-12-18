@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"gopkg.in/olebedev/go-duktape.v3"
+	"github.com/nayarsystems/go-duktape"
 )
 
 func main() {
