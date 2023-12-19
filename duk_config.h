@@ -2896,11 +2896,10 @@ typedef struct duk_hthread duk_context;
 #endif
 
 
-duk_bool_t goExecTimeoutCheck(void *userData);
-void goFatalErrorHandler(void *userData, char *msg);
+#include "go_wrappers.h"
 
-#define DUK_USE_EXEC_TIMEOUT_CHECK goExecTimeoutCheck
-#define DUK_USE_FATAL_HANDLER goFatalErrorHandler
+#define DUK_USE_EXEC_TIMEOUT_CHECK goWrapperExecTimeoutCheck
+#define DUK_USE_FATAL_HANDLER goWrapperFatalErrorHandler
 #define DUK_USE_INTERRUPT_COUNTER
 
 /*
