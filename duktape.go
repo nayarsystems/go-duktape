@@ -20,7 +20,6 @@ extern void goFinalizeCall(duk_context *ctx);
 */
 import "C"
 import (
-	goContext "context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -49,7 +48,7 @@ type context struct {
 	timerIndex              *timerIndex
 	fatalErrorHandler       func(dctx *Context, emsg string)
 	execTimeoutCheckHandler func(dctx *Context) bool
-	goCtx                   goContext.Context
+	data                    any
 }
 
 func createDukContext(d *Context) {
@@ -126,12 +125,12 @@ func (d *Context) SetFatalErrorHandler(fn func(dctx *Context, emsg string)) {
 	d.fatalErrorHandler = fn
 }
 
-func (d *Context) SetGoContext(goCtx goContext.Context) {
-	d.goCtx = goCtx
+func (d *Context) SetContextData(data any) {
+	d.data = data
 }
 
-func (d *Context) GetGoContext() goContext.Context {
-	return d.goCtx
+func (d *Context) GetContextData() any {
+	return d.data
 }
 
 // PushGlobalGoFunction push the given function into duktape global object

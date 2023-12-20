@@ -1,7 +1,7 @@
 package duktape
 
 import (
-	goContext "context"
+	goCtx "context"
 	"sync"
 	"testing"
 
@@ -110,10 +110,11 @@ func (s *DuktapeSuite) TestMyAddTwo(c *C) {
 }
 
 func (s *DuktapeSuite) TestPevalTimeout(c *C) {
-	ctx, ctxCancel := goContext.WithCancel(goContext.Background())
-	s.ctx.SetGoContext(ctx)
+	ctx, ctxCancel := goCtx.WithCancel(goCtx.Background())
+	s.ctx.SetContextData(ctx)
 	s.ctx.SetExecTimeoutCheckHandler(func(dctx *Context) bool {
-		return dctx.GetGoContext().Err() != nil
+		gctx := dctx.GetContextData().(goCtx.Context)
+		return gctx.Err() != nil
 	})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -127,10 +128,11 @@ func (s *DuktapeSuite) TestPevalTimeout(c *C) {
 }
 
 func (s *DuktapeSuite) TestPcallTimeout(c *C) {
-	ctx, ctxCancel := goContext.WithCancel(goContext.Background())
-	s.ctx.SetGoContext(ctx)
+	ctx, ctxCancel := goCtx.WithCancel(goCtx.Background())
+	s.ctx.SetContextData(ctx)
 	s.ctx.SetExecTimeoutCheckHandler(func(dctx *Context) bool {
-		return dctx.GetGoContext().Err() != nil
+		gctx := dctx.GetContextData().(goCtx.Context)
+		return gctx.Err() != nil
 	})
 	var wg sync.WaitGroup
 	wg.Add(1)
