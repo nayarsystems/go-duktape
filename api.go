@@ -633,6 +633,11 @@ func (d *Context) IsBuffer(index int) bool {
 	return int(C.duk_is_buffer(d.duk_context, C.duk_idx_t(index))) == 1
 }
 
+// See: http://duktape.org/api.html#duk_is_buffer_data
+func (d *Context) IsBufferData(index int) bool {
+	return int(C.duk_is_buffer_data(d.duk_context, C.duk_idx_t(index))) == 1
+}
+
 // See: http://duktape.org/api.html#duk_is_c_function
 func (d *Context) IsCFunction(index int) bool {
 	return int(C.duk_is_c_function(d.duk_context, C.duk_idx_t(index))) == 1
