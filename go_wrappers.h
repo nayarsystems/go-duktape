@@ -7,8 +7,13 @@
 extern duk_bool_t goExecTimeoutCheck(uint32_t ctxId);
 extern void goFatalErrorHandler(uint32_t ctxId, char *msg);
 
+extern void goTrackMalloc(uint32_t ctxId, void *ptr, size_t size);
+extern void goTrackRealloc(uint32_t ctxId, void *ptr, void *nptr, size_t size);
+extern void goTrackFree(uint32_t ctxId, void *ptr);
+
 duk_bool_t goWrapperExecTimeoutCheck(void *userData);
 void goWrapperFatalErrorHandler(void *userData, const char *msg);
 duk_context *goWrapperDukCreateHeap(uint32_t id);
+duk_context *goWrapperDukCreateHeapWithHooks(uint32_t id);
 
 #endif

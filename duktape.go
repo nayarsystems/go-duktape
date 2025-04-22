@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"regexp"
 	"sync"
+	"unsafe"
 )
 
 var reFuncName = regexp.MustCompile("^[a-z_][a-z0-9_]*([A-Z_][a-z0-9_]*)*$")
@@ -48,42 +49,71 @@ type context struct {
 	timerIndex              *timerIndex
 	fatalErrorHandler       func(dctx *Context, emsg string)
 	execTimeoutCheckHandler func(dctx *Context) bool
+	mallocHook              func(ptr unsafe.Pointer, size C.size_t)
+	freeHook                func(ptr unsafe.Pointer)
+	reallocHook             func(ptr unsafe.Pointer, nptr unsafe.Pointer, size C.size_t)
 	data                    any
 }
 
-func createDukContext(d *Context) {
-	// Create a unique identifier for this context.
-	if d.dukCtxId != 0 {
-		panic(fmt.Sprintf("context (%p) already exists", d))
-	}
-
-	d.dukCtxId = contexts.add(d)
-	d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId))
-}
-
-// New returns plain initialized duktape context object
-// See: http://duktape.org/api.html#duk_create_heap_default
-func New() *Context {
+func new(createDukContext func(d *Context), flags *Flags) *Context {
 	d := &Context{
 		&context{
 			fnIndex:    newFunctionIndex(),
 			timerIndex: &timerIndex{},
 		},
 	}
+
+	// Create a unique identifier for this context.
+	if d.dukCtxId != 0 {
+		panic(fmt.Sprintf("context (%p) already exists", d))
+	}
+	d.dukCtxId = contexts.add(d)
+
 	createDukContext(d)
-	C.duk_logging_init(d.duk_context, 0)
-	C.duk_print_alert_init(d.duk_context, 0)
+	C.duk_logging_init(d.duk_context, C.duk_uint_t(flags.Logging))
+	C.duk_print_alert_init(d.duk_context, C.duk_uint_t(flags.PrintAlert))
 	C.duk_module_duktape_init(d.duk_context)
-	C.duk_console_init(d.duk_context, 0)
+	C.duk_console_init(d.duk_context, C.duk_uint_t(flags.Console))
 
 	return d
 }
 
+// New returns plain initialized duktape context object
+// See: http://duktape.org/api.html#duk_create_heap_default
+func New() *Context {
+	return new(func(d *Context) {
+		d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId))
+	}, &Flags{})
+}
+
+// NewWithFlags returns plain initialized duktape context object
+// You can control the behaviour of duktape by setting flags.
+// See: http://duktape.org/api.html#duk_create_heap
+func NewWithFlags(flags *Flags) *Context {
+	return new(func(d *Context) {
+		if flags.MallocHook != nil {
+			d.mallocHook = func(ptr unsafe.Pointer, size C.size_t) {
+				flags.MallocHook(ptr, uint64(size))
+			}
+		}
+		d.freeHook = flags.FreeHook
+		if flags.ReallocHook != nil {
+			d.reallocHook = func(ptr unsafe.Pointer, nptr unsafe.Pointer, size C.size_t) {
+				flags.ReallocHook(ptr, nptr, uint64(size))
+			}
+		}
+		d.duk_context = C.goWrapperDukCreateHeapWithHooks(C.uint32_t(d.dukCtxId))
+	}, flags)
+}
+
 // Flags is a set of flags for controlling the behaviour of duktape.
 type Flags struct {
-	Logging    uint
-	PrintAlert uint
-	Console    uint
+	Logging     uint
+	PrintAlert  uint
+	Console     uint
+	MallocHook  func(unsafe.Pointer, uint64)
+	FreeHook    func(unsafe.Pointer)
+	ReallocHook func(unsafe.Pointer, unsafe.Pointer, uint64)
 }
 
 // FlagConsoleProxyWrapper is a Console flag.
@@ -93,25 +123,6 @@ const FlagConsoleProxyWrapper = 1 << 0
 // FlagConsoleFlush is a Console flag.
 // Flush output after every call.
 const FlagConsoleFlush = 1 << 1
-
-// NewWithFlags returns plain initialized duktape context object
-// You can control the behaviour of duktape by setting flags.
-// See: http://duktape.org/api.html#duk_create_heap_default
-func NewWithFlags(flags *Flags) *Context {
-	d := &Context{
-		&context{
-			fnIndex:    newFunctionIndex(),
-			timerIndex: &timerIndex{},
-		},
-	}
-	createDukContext(d)
-	C.duk_logging_init(d.duk_context, C.duk_uint_t(flags.Logging))
-	C.duk_print_alert_init(d.duk_context, C.duk_uint_t(flags.PrintAlert))
-	C.duk_module_duktape_init(d.duk_context)
-	C.duk_console_init(d.duk_context, C.duk_uint_t(flags.Console))
-
-	return d
-}
 
 func contextFromPointer(ctx *C.duk_context) *Context {
 	return &Context{&context{duk_context: ctx}}
@@ -210,6 +221,30 @@ func goFatalErrorHandler(id C.uint32_t, msg *C.char) {
 		return
 	}
 	panic(fmt.Sprintf("duktape fatal error: %s", C.GoString(msg)))
+}
+
+//export goTrackMalloc
+func goTrackMalloc(id C.uint32_t, ptr unsafe.Pointer, size C.size_t) {
+	d := contexts.get(uint32(id))
+	if d != nil && d.mallocHook != nil {
+		d.mallocHook(ptr, size)
+	}
+}
+
+//export goTrackFree
+func goTrackFree(id C.uint32_t, ptr unsafe.Pointer) {
+	d := contexts.get(uint32(id))
+	if d != nil && d.freeHook != nil {
+		d.freeHook(ptr)
+	}
+}
+
+//export goTrackRealloc
+func goTrackRealloc(id C.uint32_t, ptr unsafe.Pointer, nptr unsafe.Pointer, size C.size_t) {
+	d := contexts.get(uint32(id))
+	if d != nil && d.reallocHook != nil {
+		d.reallocHook(ptr, nptr, size)
+	}
 }
 
 func (d *Context) getFunctionPtrs() (IdKey, *Context) {
