@@ -8,6 +8,7 @@ package duktape
 #include "duk_logging.h"
 #include "duk_v1_compat.h"
 #include "duk_print_alert.h"
+#include "go_wrappers.h"
 static void _duk_eval_string(duk_context *ctx, const char *str) {
   duk_eval_string(ctx, str);
 }
@@ -312,7 +313,7 @@ func (d *Context) DefProp(objIndex int, flags uint) {
 // See: http://duktape.org/api.html#duk_destroy_heap
 func (d *Context) DestroyHeap() {
 	d.Gc(0)
-	C.duk_destroy_heap(d.duk_context)
+	C.goWrapperDukDestroyHeap(d.duk_context)
 	d.duk_context = nil
 	d.fnIndex.destroy()
 	contexts.delete(d)

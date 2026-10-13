@@ -89,8 +89,16 @@ func New() *Context {
 // NewWithFlags returns plain initialized duktape context object
 // You can control the behaviour of duktape by setting flags.
 // See: http://duktape.org/api.html#duk_create_heap
+//
+// Without any hook it creates the same heap New() does. With hooks, they are
+// told about what duktape allocates and frees, on top of the same block cache
+// (see heap_cache.c).
 func NewWithFlags(flags *Flags) *Context {
 	return new(func(d *Context) {
+		if flags.MallocHook == nil && flags.FreeHook == nil && flags.ReallocHook == nil {
+			d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId))
+			return
+		}
 		if flags.MallocHook != nil {
 			d.mallocHook = func(ptr unsafe.Pointer, size C.size_t) {
 				flags.MallocHook(ptr, uint64(size))
@@ -104,6 +112,12 @@ func NewWithFlags(flags *Flags) *Context {
 		}
 		d.duk_context = C.goWrapperDukCreateHeapWithHooks(C.uint32_t(d.dukCtxId))
 	}, flags)
+}
+
+// heapCacheBytes is how much freed memory the heap's block cache holds (see
+// heap_cache.c). For tests.
+func (d *Context) heapCacheBytes() int {
+	return int(C.goWrapperDukHeapCacheBytes(d.duk_context))
 }
 
 // Flags is a set of flags for controlling the behaviour of duktape.
