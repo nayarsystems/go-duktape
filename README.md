@@ -97,6 +97,12 @@ $
 
 Also you can `FlushTimers()`.
 
+### Heap block cache
+
+Every heap allocates through a small per-heap cache of freed blocks, which
+avoids a per-call `mmap`/`munmap` under musl's allocator. It can be bounded or
+disabled with `Flags.HeapCacheMaxBytes`. See [HEAP_CACHE.md](HEAP_CACHE.md).
+
 ### Command line tool
 
 Install `go get gopkg.in/olebedev/go-duktape.v3/...`.  
