@@ -144,7 +144,9 @@ calling into Go on each allocation.
 ## What it does not cover
 
 - **Blocks larger than 16 KB.** A script that builds and drops buffers or
-  strings that big in every call still goes to `malloc` for them.
+  strings that big in every call still goes to `malloc` for them, and under
+  musl still pays page faults on every call (`work=array/n=2048` in the
+  benchmark: an array of more than 1024 entries).
 - **cgo's own allocations.** Strings passed from Go to duktape go through
   `C.CString`, which uses the C library's `malloc` directly, not the heap's
   memory functions. If an allocation pattern there ever triggers the same
@@ -158,11 +160,12 @@ calling into Go on each allocation.
 
 `BenchmarkHeapCache` (`heap_cache_bench_test.go`) runs a call that builds
 garbage and drops it, with the cache off and on, and reports the page faults
-per call next to the time. Two kinds of garbage:
+per thousand calls (`faults/kop`) next to the time. Two kinds of garbage:
 
 - `work=objects`: n loose objects, all of them small blocks;
-- `work=array`: an array of n objects, whose element storage is a large
-  block that grows as the array does.
+- `work=array`: an array of n objects, whose element storage (16 bytes per
+  entry) is a block that grows as the array does; with n=2048 it grows past
+  the largest cached class.
 
 The effect is musl's, so build the benchmark statically linked against musl.
 The repository's flake has a dev shell for that, `musl`, whose `CC` links
@@ -177,6 +180,11 @@ nix develop .#musl --command go test -c -o heapcache.test \
 benchstat -col /cache bench.txt
 ```
 
+`benchstat` scales each row of the `faults/kop` table to its smallest value,
+so a row like 35,000 → 2 shows as `35000.000` → `2.000`, and 3,000 → 0.4 as
+`3082000.0m` → `400.0m` (m being thousandths). `benchstat -format csv` prints
+the plain numbers.
+
 Each step only runs if the one before worked, so a failed build never leaves
 an old binary to be measured. The `GLIBC_` check matters: `go test -c` with
 those flags outside the musl shell also builds a static binary, against
@@ -189,17 +197,30 @@ The binary is static, so it runs anywhere once built. The idefix dev shell
 (`nix develop` in the idefix repository) works too: its `CC` is a musl
 cross-compiler as well.
 
-On 2026-10-14, AMD Ryzen 7 5700U, ten runs, built in the idefix dev shell
-(the flake's musl shell, musl 1.2.5, gives the same within a few percent):
+On 2026-10-14, AMD Ryzen 7 5700U, ten runs, built in the flake's musl shell
+(musl 1.2.5):
 
-| Work | Cache off | Cache on | Page faults per call (off → on) |
+| Work | Cache off | Cache on | Page faults per 1000 calls (off → on) |
 |---|---|---|---|
-| 32 objects | 33 µs | 13 µs (−60%) | 2.0 → 0.0001 |
-| 128 objects | 114 µs | 50 µs (−56%) | 10 → 0.0005 |
-| 512 objects | 409 µs | 204 µs (−50%) | 35 → 0.002 |
-| array of 32 | 25 µs | 18 µs (−28%) | 0.04 → 0.0003 |
-| array of 128 | 118 µs | 61 µs (−48%) | 7.0 → 0.0007 |
-| array of 512 | 534 µs | 233 µs (−56%) | 49 → 0.003 |
+| 32 objects | 32 µs | 14 µs (−54%) | 1,010 → 0.1 |
+| 128 objects | 112 µs | 55 µs (−51%) | 7,000 → 0.4 |
+| 512 objects | 406 µs | 215 µs (−47%) | 27,001 → 1.8 |
+| array of 32 | 26 µs | 19 µs (−27%) | 19 → 0.2 |
+| array of 128 | 114 µs | 63 µs (−44%) | 5,022 → 0.55 |
+| array of 512 | 501 µs | 242 µs (−52%) | 34,998 → 2.4 |
+| array of 2048 | 1.95 ms | 1.19 ms (−39%) | 186,998 → 35,411 |
+
+Up to 512 entries, the few faults left with the cache on are the process's,
+not the heap's (the Go runtime, the garbage collector): a fraction of one per
+thousand calls. The array of 2048 is the cache's limit at work: its element
+storage grows to some 32 KB, past the largest class, and those blocks still
+go to musl on every call, some 35 page faults per call. The small blocks
+around it are still cached, hence the gain in time.
+
+How many faults a given workload causes without the cache varies between
+builds and runs (for 128 objects it has measured anywhere from 3,000 to
+10,000 per thousand calls): it depends on where the heap's blocks fall
+relative to musl's groups, the very luck the cache removes.
 
 Built against glibc instead (a plain `go test` outside any of those shells), the
 cache still saves something, as taking a block from a free list is cheaper

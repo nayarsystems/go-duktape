@@ -2,8 +2,10 @@ package duktape
 
 // What the heap's block cache saves (see HEAP_CACHE.md): a call that builds
 // garbage and drops it, with the cache off and on. Besides the time, it
-// reports the page faults per call, which is how the allocator going back to
-// the kernel on every call shows.
+// reports the page faults per thousand calls (faults/kop), which is how the
+// allocator going back to the kernel on every call shows. Per thousand, not
+// per call, so that the near-zero side does not come out in benchstat as µ
+// and the other as m.
 //
 // The effect is musl's: build and run it statically linked against musl, in
 // the flake's musl shell. Against glibc the cache saves far less.
@@ -22,8 +24,9 @@ import (
 )
 
 // The two kinds of garbage a call may build: loose objects, all of them
-// small blocks; and an array that grows past 1 KB, whose element storage is a
-// large block reallocated as it grows.
+// small blocks; and an array whose element storage (16 bytes per entry) is a
+// block reallocated as it grows: past 1 KB at 64 entries, and past the
+// largest cached class (16 KB) at 1024, which n=2048 is there to show.
 const benchWork = `
 function objects(n) {
     var head = null;
@@ -55,8 +58,16 @@ func BenchmarkHeapCache(b *testing.B) {
 		{"off", -1},
 		{"on", 0},
 	}
-	for _, work := range []string{"objects", "array"} {
-		for _, n := range []int{32, 128, 512} {
+	works := []struct {
+		name string
+		ns   []int
+	}{
+		{"objects", []int{32, 128, 512}},
+		{"array", []int{32, 128, 512, 2048}},
+	}
+	for _, w := range works {
+		work := w.name
+		for _, n := range w.ns {
 			for _, c := range caches {
 				b.Run(fmt.Sprintf("work=%s/n=%d/cache=%s", work, n, c.name), func(b *testing.B) {
 					ctx := NewWithFlags(&Flags{HeapCacheMaxBytes: c.maxBytes})
@@ -77,7 +88,7 @@ func BenchmarkHeapCache(b *testing.B) {
 						ctx.Pop()
 					}
 					b.StopTimer()
-					b.ReportMetric(float64(minorFaults(b)-faults)/float64(b.N), "faults/op")
+					b.ReportMetric(float64(minorFaults(b)-faults)*1000/float64(b.N), "faults/kop")
 				})
 			}
 		}
