@@ -12,8 +12,8 @@ duktape allocates and frees constantly: every object, string, buffer and
 property table of a script, and much of it only lives for one call. By
 default it does that through the C library's `malloc` and `free`.
 
-A program linked statically against **musl** (as the idefix firmware is, on
-every architecture) gets musl's allocator, mallocng. mallocng groups blocks of
+A program linked statically against **musl**, as embedded Linux programs
+often are, gets musl's allocator, mallocng. mallocng groups blocks of
 the same size class and hands a group back to the kernel (`munmap`) **as soon
 as every block in it is free**. That is a good policy for memory footprint,
 and a bad one for a pattern like this:
@@ -29,11 +29,11 @@ shows as time spent in the kernel.
 
 Whether it happens depends on exactly where a heap's allocations fall relative
 to the group boundaries, which depends on everything the script does, and on
-how its source happens to be laid out. In idefix it appeared and disappeared
-with changes that did nothing to the code: importing a module without using
-it, or removing semicolons that automatic semicolon insertion made redundant.
-Measured on the gateway's bevents snippet (`BenchmarkCore_Tick` in
-`targets/gsr2`), with the same bundle:
+how its source happens to be laid out. In one program it appeared and
+disappeared with changes that did nothing to the code: importing a module
+without using it, or removing semicolons that automatic semicolon insertion
+made redundant. Measured on a real event-processing script, one call per
+event, with the same bundle:
 
 | | Time per call | Page faults (20k calls) | mmap+munmap (5k calls) | Instructions |
 |---|---|---|---|---|
@@ -196,9 +196,8 @@ saves far less (see below), so measuring the wrong one gives the wrong
 picture. Nix only sees files tracked by git: a `flake.nix` not committed yet
 needs `git add -N flake.nix` (or `nix develop 'path:.#musl'`).
 
-The binary is static, so it runs anywhere once built. The idefix dev shell
-(`nix develop` in the idefix repository) works too: its `CC` is a musl
-cross-compiler as well.
+The binary is static, so it runs anywhere once built. Any shell whose `CC`
+links statically against musl works as well.
 
 On 2026-10-14, AMD Ryzen 7 5700U, ten runs, built in the flake's musl shell
 (musl 1.2.5):
@@ -255,6 +254,44 @@ Tests (`heap_cache_test.go`):
 - the exec timeout check still finding its context, with every way of
   creating a heap (the context id now travels in the same `udata` as the
   cache).
+
+### On armv7
+
+On armv7 the cache's header is 8 bytes and duktape packs its values in 8
+bytes, so the cache's tests are worth running there too. The flake's `armv7`
+shell builds against musl with musl.cc's prebuilt toolchain
+(`armv7l-linux-musleabihf`, GCC 11.2.1) and has qemu to run what it builds:
+
+```bash
+nix develop .#armv7 --command go test -exec qemu-arm \
+    -tags netgo -ldflags '-s -w -extldflags=-static' -run HeapCache .
+```
+
+`-run HeapCache` matters: the package's older gocheck suite (`Test`) crashes
+under qemu, with or without the cache (checked on the commit before it). The
+crashes come from its timer tests (`timers_test.go`), which race with the
+`setTimeout`/`setInterval` goroutines on the same heap: the goroutines take
+the context's lock, the tests do not. Natively the timing hides it; qemu's
+slower emulation exposes it. Every other test, the rest of the gocheck suite
+included, passes there run after run.
+
+The benchmark runs the same way:
+
+```bash
+nix develop .#armv7 --command go test -exec qemu-arm \
+    -tags netgo -ldflags '-s -w -extldflags=-static' \
+    -run XXX -bench HeapCache -benchtime 2000x -count 3 . > bench-armv7.txt
+benchstat -format csv -col /cache bench-armv7.txt
+```
+
+Its times are qemu's, about ten times the native ones, and say nothing about
+the board; its page faults do mean something, as the guest's `mmap`/`munmap`
+reach the host's kernel. On 2026-10-14 they showed the same effect as on
+x86_64 (512 objects: 23,004 → 20 faults per thousand calls), and the array
+of 2048 staying within the cache (156,002 → 499), as its 8-byte entries
+take some 16 KB, not 32. Real timings need the board itself.
+
+### Seeing it in any program
 
 To see the effect itself, run a benchmark of a script under a static musl
 build and look at page faults and memory syscalls:

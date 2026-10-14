@@ -1,12 +1,12 @@
 // A per-heap cache of freed small blocks, under every heap this package
 // creates (New, and NewWithFlags with or without tracking hooks).
 //
-// Why: a statically linked musl (the firmware's libc) uses mallocng, which
-// hands a group of blocks back to the system as soon as the whole group is
-// free. When the blocks a script allocates and frees in one call happen to
-// fill and empty a group, every call pays an mmap, an munmap and the page
-// faults in between — measured at about +55% per call on a bevents snippet, with
-// the same instructions executed. Whether it happens depends on where the
+// Why: a statically linked musl uses mallocng, which hands a group of blocks
+// back to the system as soon as the whole group is free. When the blocks a
+// script allocates and frees in one call happen to fill and empty a group,
+// every call pays an mmap, an munmap and the page faults in between —
+// measured at about +55% per call on an event-processing script, with the
+// same instructions executed. Whether it happens depends on where the
 // heap's allocations fall, so any change to any script can turn it on or off.
 //
 // The cache keeps freed small blocks on per-size free lists instead of
