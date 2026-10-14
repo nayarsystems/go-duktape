@@ -29,8 +29,8 @@
 
 // Size classes: multiples of 16 up to 1 KB, where most of a script's blocks
 // fall, then powers of two up to 16 KB, for the arrays and strings a call
-// may build and drop (a growing array, at 16 bytes per entry, passes 1 KB at
-// 64 entries). Past 16 KB a block is not cached.
+// may build and drop (a growing array, at 16 bytes per entry on 64-bit, 8 on
+// armv7, passes 1 KB at 64 entries, or 128). Past 16 KB a block is not cached.
 #define HEAP_CACHE_STEP 16
 #define HEAP_CACHE_LINEAR_CLASSES 64 /* 16, 32, ... 1024 bytes */
 #define HEAP_CACHE_LINEAR_MAX (HEAP_CACHE_STEP * HEAP_CACHE_LINEAR_CLASSES)

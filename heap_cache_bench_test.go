@@ -24,9 +24,10 @@ import (
 )
 
 // The two kinds of garbage a call may build: loose objects, all of them
-// small blocks; and an array whose element storage (16 bytes per entry) is a
-// block reallocated as it grows: past 1 KB at 64 entries, and past the
-// largest cached class (16 KB) at 1024, which n=2048 is there to show.
+// small blocks; and an array whose element storage (16 bytes per entry on
+// x86_64) is a block reallocated as it grows: past 1 KB at 64 entries, and
+// past the largest cached class (16 KB) at 1024, which n=2048 is there to
+// show. On armv7 entries take 8 bytes, so each threshold comes at twice n.
 const benchWork = `
 function objects(n) {
     var head = null;

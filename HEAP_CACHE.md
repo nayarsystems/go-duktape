@@ -55,7 +55,8 @@ Requests are rounded up to a size class:
   tables);
 - from 1 KB to **16 KB**, to a power of two: 4 classes (2, 4, 8 and 16 KB),
   for the arrays and strings a call may build and drop. A growing array
-  needs 16 bytes per entry, so it passes 1 KB at 64 entries.
+  needs 16 bytes per entry on x86_64 and aarch64, so it passes 1 KB at 64
+  entries; 8 on armv7, where duktape packs its values, so twice as many.
 
 Each class has a singly linked list of free blocks; the link lives in the
 first bytes of the free block itself, so a list costs no memory of its own.
@@ -66,7 +67,9 @@ first bytes of the free block itself, so a list costs no memory of its own.
   already at its bound (see below), in which case it goes back to `free`.
 - **realloc(ptr, size)**: if the new size still fits in the block's class,
   return the same block, at no cost; otherwise allocate a block of the new
-  size, copy, and free the old one through the cache.
+  size, copy, and free the old one through the cache. A block that shrinks
+  keeps its class: a 16 KB block reallocated down to 100 bytes still takes
+  16 KB until it is freed.
 
 Requests larger than 16 KB are not cached: they go straight to
 `malloc`/`realloc`/`free`, marked as such in their header. A cache with only
@@ -164,8 +167,8 @@ per thousand calls (`faults/kop`) next to the time. Two kinds of garbage:
 
 - `work=objects`: n loose objects, all of them small blocks;
 - `work=array`: an array of n objects, whose element storage (16 bytes per
-  entry) is a block that grows as the array does; with n=2048 it grows past
-  the largest cached class.
+  entry on x86_64) is a block that grows as the array does; with n=2048 it
+  grows past the largest cached class.
 
 The effect is musl's, so build the benchmark statically linked against musl.
 The repository's flake has a dev shell for that, `musl`, whose `CC` links
