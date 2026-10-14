@@ -48,10 +48,17 @@ effect does not show on a desktop build.
 
 ### Size classes and free lists
 
-Requests up to **1024 bytes** are rounded up to a multiple of **16**: 64 size
-classes (16, 32, 48, … 1024). Each class has a singly linked list of free
-blocks; the link lives in the first bytes of the free block itself, so a list
-costs no memory of its own.
+Requests are rounded up to a size class:
+
+- up to **1 KB**, to a multiple of **16**: 64 classes (16, 32, 48, … 1024),
+  where most of a script's blocks fall (objects, short strings, property
+  tables);
+- from 1 KB to **16 KB**, to a power of two: 4 classes (2, 4, 8 and 16 KB),
+  for the arrays and strings a call may build and drop. A growing array
+  needs 16 bytes per entry, so it passes 1 KB at 64 entries.
+
+Each class has a singly linked list of free blocks; the link lives in the
+first bytes of the free block itself, so a list costs no memory of its own.
 
 - **alloc(size)**: take a block from the class's list if there is one;
   otherwise `malloc` a new one of the class's size.
@@ -61,10 +68,11 @@ costs no memory of its own.
   return the same block, at no cost; otherwise allocate a block of the new
   size, copy, and free the old one through the cache.
 
-Requests larger than 1024 bytes are not cached: they go straight to
-`malloc`/`realloc`/`free`, marked as such in their header. Caching them would
-need either many more classes or blocks much bigger than asked for, and the
-small blocks are where the per-call churn of a script is.
+Requests larger than 16 KB are not cached: they go straight to
+`malloc`/`realloc`/`free`, marked as such in their header. A cache with only
+the small classes was not enough: an array growing past 1 KB in every call
+still made the allocator go back to the kernel on every call
+(`work=array` in the benchmark below).
 
 ### The header
 
@@ -78,11 +86,13 @@ pointer handed to duktape is as aligned as one from `malloc`:
 | x86_64, aarch64 | 16 bytes |
 | armv7 | 8 bytes |
 
-On top of the header, a block also spends up to 15 bytes on rounding to its
-class. That is the cache's cost in footprint. It has not been measured; as an
-estimate, for duktape's typical allocations of tens to a few hundred bytes it
-adds some 10–25% to the heap's live size (16 bytes of header and 7.5 of
-rounding on average, on a 100-byte block, is 23%).
+On top of the header, a block also spends some bytes on rounding to its
+class: up to 15 below 1 KB, and up to half the block in the power-of-two
+classes (a 1.1 KB block takes a 2 KB class). That is the cache's cost in
+footprint. It has not been measured; as an estimate, for duktape's typical
+allocations of tens to a few hundred bytes it adds some 10–25% to the heap's
+live size (16 bytes of header and 7.5 of rounding on average, on a 100-byte
+block, is 23%), more for blocks between 1 and 16 KB.
 
 ### The bound
 
@@ -133,6 +143,8 @@ calling into Go on each allocation.
 
 ## What it does not cover
 
+- **Blocks larger than 16 KB.** A script that builds and drops buffers or
+  strings that big in every call still goes to `malloc` for them.
 - **cgo's own allocations.** Strings passed from Go to duktape go through
   `C.CString`, which uses the C library's `malloc` directly, not the heap's
   memory functions. If an allocation pattern there ever triggers the same
@@ -142,11 +154,76 @@ calling into Go on each allocation.
   times the bound (plus headers, see The bound) more than it would without the
   cache.
 
+## Measuring it
+
+`BenchmarkHeapCache` (`heap_cache_bench_test.go`) runs a call that builds
+garbage and drops it, with the cache off and on, and reports the page faults
+per call next to the time. Two kinds of garbage:
+
+- `work=objects`: n loose objects, all of them small blocks;
+- `work=array`: an array of n objects, whose element storage is a large
+  block that grows as the array does.
+
+The effect is musl's, so build the benchmark statically linked against musl.
+The repository's flake has a dev shell for that, `musl`, whose `CC` links
+statically against musl:
+
+```bash
+rm -f heapcache.test &&
+nix develop .#musl --command go test -c -o heapcache.test \
+    -tags netgo -ldflags '-s -w -extldflags=-static' . &&
+! strings heapcache.test | grep -q GLIBC_ &&
+./heapcache.test -test.run=XXX -test.bench=HeapCache -test.benchtime=20000x -test.count=10 > bench.txt &&
+benchstat -col /cache bench.txt
+```
+
+Each step only runs if the one before worked, so a failed build never leaves
+an old binary to be measured. The `GLIBC_` check matters: `go test -c` with
+those flags outside the musl shell also builds a static binary, against
+glibc, and `file` says "statically linked" for both. Against glibc the cache
+saves far less (see below), so measuring the wrong one gives the wrong
+picture. Nix only sees files tracked by git: a `flake.nix` not committed yet
+needs `git add -N flake.nix` (or `nix develop 'path:.#musl'`).
+
+The binary is static, so it runs anywhere once built. The idefix dev shell
+(`nix develop` in the idefix repository) works too: its `CC` is a musl
+cross-compiler as well.
+
+On 2026-10-14, AMD Ryzen 7 5700U, ten runs, built in the idefix dev shell
+(the flake's musl shell, musl 1.2.5, gives the same within a few percent):
+
+| Work | Cache off | Cache on | Page faults per call (off → on) |
+|---|---|---|---|
+| 32 objects | 33 µs | 13 µs (−60%) | 2.0 → 0.0001 |
+| 128 objects | 114 µs | 50 µs (−56%) | 10 → 0.0005 |
+| 512 objects | 409 µs | 204 µs (−50%) | 35 → 0.002 |
+| array of 32 | 25 µs | 18 µs (−28%) | 0.04 → 0.0003 |
+| array of 128 | 118 µs | 61 µs (−48%) | 7.0 → 0.0007 |
+| array of 512 | 534 µs | 233 µs (−56%) | 49 → 0.003 |
+
+Built against glibc instead (a plain `go test` outside any of those shells), the
+cache still saves something, as taking a block from a free list is cheaper
+than a call to `malloc`, but far less, and there are no page faults to save:
+
+| Work | Cache off | Cache on |
+|---|---|---|
+| 32 objects | 14 µs | 13 µs (−6%) |
+| 128 objects | 57 µs | 48 µs (−15%) |
+| 512 objects | 230 µs | 193 µs (−16%) |
+| array of 32 | 19 µs | 17 µs (−13%) |
+| array of 128 | 70 µs | 57 µs (−18%) |
+| array of 512 | 263 µs | 220 µs (−16%) |
+
+The gap between the two tables is the part of the gain that is musl's
+allocator going back to the kernel.
+
 ## Checking it
 
 Tests (`heap_cache_test.go`):
 
-- scripts that allocate, grow and free a lot, and check their own results;
+- scripts that allocate, grow and free a lot, and check their own results,
+  including buffers of every large class and around their boundaries;
+- which blocks are kept: up to 16 KB yes, larger no;
 - the bound, the default one and one set with `Flags.HeapCacheMaxBytes`;
 - the cache disabled, with and without tracking hooks;
 - the cache under tracking hooks, and the hooks' bookkeeping (everything
@@ -184,6 +261,7 @@ ctx := duktape.NewWithFlags(&duktape.Flags{HeapCacheMaxBytes: -1})        // no 
 Disabling it is meant for comparing and diagnosing, e.g. benchmarking a script
 with and without the cache from the same build.
 
-The class step (16 bytes) and the largest cached size (1024 bytes) are
-compile-time constants at the top of `heap_cache.c` (`HEAP_CACHE_STEP`,
-`HEAP_CACHE_CLASSES`): they are internal details, not tuning knobs.
+The size classes (the 16-byte step up to 1 KB, the power-of-two classes up
+to 16 KB) are compile-time constants at the top of `heap_cache.c`
+(`HEAP_CACHE_STEP`, `HEAP_CACHE_LINEAR_CLASSES`, `HEAP_CACHE_POW2_CLASSES`):
+they are internal details, not tuning knobs.

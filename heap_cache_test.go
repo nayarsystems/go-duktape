@@ -230,6 +230,47 @@ func TestHeapCache_ManyHeaps(t *testing.T) {
 	}
 }
 
+// Blocks past 1 KB are cached in power-of-two classes up to 16 KB; larger ones
+// go straight back to malloc.
+func TestHeapCache_LargeBlocks(t *testing.T) {
+	ctx := New()
+	defer ctx.DestroyHeap()
+	dropBuffer := func(size int) int {
+		ctx.Gc(0)
+		before := ctx.heapCacheBytes()
+		require.NoError(t, ctx.PevalString(fmt.Sprintf(`(function () { var b = new Uint8Array(%d); b[0] = 1; })()`, size)))
+		ctx.Pop()
+		ctx.Gc(0)
+		return ctx.heapCacheBytes() - before
+	}
+	require.GreaterOrEqual(t, dropBuffer(8000), 8192, "an 8000-byte buffer is kept in the 8 KB class")
+	require.Less(t, dropBuffer(40000), 16*1024, "a 40000-byte buffer is not kept")
+}
+
+// Buffers of every class size, and around the class boundaries, keep their
+// content, also while growing from one class to the next.
+func TestHeapCache_LargeBlocksKeepContent(t *testing.T) {
+	ctx := New()
+	defer ctx.DestroyHeap()
+	require.NoError(t, ctx.PevalString(`
+        var sizes = [1000, 1024, 1025, 2048, 2049, 4096, 4097, 8192, 8193, 16384, 16385, 40000];
+        var ok = true;
+        for (var round = 0; round < 3; round++) {
+            for (var i = 0; i < sizes.length; i++) {
+                var b = new Uint8Array(sizes[i]);
+                for (var j = 0; j < b.length; j++) { b[j] = (j + round) & 255; }
+                for (var j = 0; j < b.length; j++) { if (b[j] !== ((j + round) & 255)) { ok = false; } }
+            }
+            var a = [];
+            for (var j = 0; j < 3000; j++) { a.push(j); }
+            for (var j = 0; j < 3000; j++) { if (a[j] !== j) { ok = false; } }
+        }
+        ok;
+    `))
+	defer ctx.Pop()
+	require.True(t, ctx.GetBoolean(-1))
+}
+
 // A string that grows past the biggest class and back keeps its content.
 func TestHeapCache_GrowingString(t *testing.T) {
 	ctx := New()

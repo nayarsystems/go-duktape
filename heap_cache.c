@@ -17,8 +17,8 @@
 // makes these functions plain malloc, realloc and free.
 //
 // Each block carries a header with its size class, since duktape's free does
-// not pass the size. Blocks larger than the biggest class are plain malloc
-// blocks with a zero class. A heap is only ever used by one thread at a time
+// not pass the size. Blocks larger than the biggest class (16 KB) are plain
+// malloc blocks with a zero class. A heap is only ever used by one thread at a time
 // (go-duktape callers serialize on the context's lock), so the cache has no
 // lock of its own.
 
@@ -27,9 +27,16 @@
 #include <string.h>
 #include "heap_cache.h"
 
+// Size classes: multiples of 16 up to 1 KB, where most of a script's blocks
+// fall, then powers of two up to 16 KB, for the arrays and strings a call
+// may build and drop (a growing array, at 16 bytes per entry, passes 1 KB at
+// 64 entries). Past 16 KB a block is not cached.
 #define HEAP_CACHE_STEP 16
-#define HEAP_CACHE_CLASSES 64 /* classes of 16, 32, ... 1024 bytes */
-#define HEAP_CACHE_MAX_SIZE (HEAP_CACHE_STEP * HEAP_CACHE_CLASSES)
+#define HEAP_CACHE_LINEAR_CLASSES 64 /* 16, 32, ... 1024 bytes */
+#define HEAP_CACHE_LINEAR_MAX (HEAP_CACHE_STEP * HEAP_CACHE_LINEAR_CLASSES)
+#define HEAP_CACHE_POW2_CLASSES 4 /* 2, 4, 8, 16 KB */
+#define HEAP_CACHE_CLASSES (HEAP_CACHE_LINEAR_CLASSES + HEAP_CACHE_POW2_CLASSES)
+#define HEAP_CACHE_MAX_SIZE (HEAP_CACHE_LINEAR_MAX << HEAP_CACHE_POW2_CLASSES)
 // The bound counts the blocks' usable bytes (their size class), not their
 // headers nor malloc's own bookkeeping: the memory actually held is somewhat
 // more.
@@ -97,7 +104,23 @@ size_t goHeapCacheCachedBytes(void *udata) {
 }
 
 static size_t classSize(uint32_t cls) {
-	return (size_t)cls * HEAP_CACHE_STEP;
+	if (cls <= HEAP_CACHE_LINEAR_CLASSES) {
+		return (size_t)cls * HEAP_CACHE_STEP;
+	}
+	return (size_t)HEAP_CACHE_LINEAR_MAX << (cls - HEAP_CACHE_LINEAR_CLASSES);
+}
+
+// sizeClass is the smallest class a block of size bytes fits in, for
+// 0 < size <= HEAP_CACHE_MAX_SIZE (a 0-byte request gets the smallest).
+static uint32_t sizeClass(duk_size_t size) {
+	if (size <= HEAP_CACHE_LINEAR_MAX) {
+		return size == 0 ? 1 : (uint32_t)((size + HEAP_CACHE_STEP - 1) / HEAP_CACHE_STEP);
+	}
+	uint32_t cls = HEAP_CACHE_LINEAR_CLASSES + 1;
+	while (classSize(cls) < size) {
+		cls++;
+	}
+	return cls;
 }
 
 void *goHeapCacheAlloc(void *udata, duk_size_t size) {
@@ -116,7 +139,7 @@ void *goHeapCacheAlloc(void *udata, duk_size_t size) {
 		h->cls = 0;
 		return (char *)h + HDR;
 	}
-	uint32_t cls = size == 0 ? 1 : (uint32_t)((size + HEAP_CACHE_STEP - 1) / HEAP_CACHE_STEP);
+	uint32_t cls = sizeClass(size);
 	heapCacheFree *f = u->lists[cls - 1];
 	if (f != NULL) {
 		u->lists[cls - 1] = f->next;
