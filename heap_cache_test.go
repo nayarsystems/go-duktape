@@ -77,7 +77,7 @@ func TestHeapCache_KeepsFreedBlocks(t *testing.T) {
 	ctx.Gc(0)
 	cached := ctx.heapCacheBytes()
 	require.Greater(t, cached, 0, "freed small blocks stay in the cache")
-	require.LessOrEqual(t, cached, 256*1024, "within the bound")
+	require.LessOrEqual(t, cached, DefaultHeapCacheMaxBytes, "within the bound")
 }
 
 // Freeing far more small blocks than the bound keeps only up to the bound:
@@ -85,6 +85,14 @@ func TestHeapCache_KeepsFreedBlocks(t *testing.T) {
 func TestHeapCache_IsBounded(t *testing.T) {
 	ctx := New()
 	defer ctx.DestroyHeap()
+	freeLots(t, ctx)
+	require.Greater(t, ctx.heapCacheBytes(), DefaultHeapCacheMaxBytes/2, "the script freed well past the bound")
+	require.LessOrEqual(t, ctx.heapCacheBytes(), DefaultHeapCacheMaxBytes)
+}
+
+// freeLots frees far more small blocks than any bound used in these tests.
+func freeLots(t *testing.T, ctx *Context) {
+	t.Helper()
 	require.NoError(t, ctx.PevalString(`
         var keep = [];
         for (var i = 0; i < 50000; i++) { keep.push({ n: i, s: "v" + i }); }
@@ -92,8 +100,47 @@ func TestHeapCache_IsBounded(t *testing.T) {
     `))
 	ctx.Pop()
 	ctx.Gc(0)
-	require.Greater(t, ctx.heapCacheBytes(), 128*1024, "the script freed well past the bound")
-	require.LessOrEqual(t, ctx.heapCacheBytes(), 256*1024)
+}
+
+// Flags.HeapCacheMaxBytes sets the bound.
+func TestHeapCache_CustomBound(t *testing.T) {
+	ctx := NewWithFlags(&Flags{HeapCacheMaxBytes: 32 * 1024})
+	defer ctx.DestroyHeap()
+	freeLots(t, ctx)
+	require.Greater(t, ctx.heapCacheBytes(), 16*1024)
+	require.LessOrEqual(t, ctx.heapCacheBytes(), 32*1024)
+}
+
+// A negative Flags.HeapCacheMaxBytes disables the cache: nothing is kept,
+// with or without tracking hooks, and the heap works as before.
+func TestHeapCache_Disabled(t *testing.T) {
+	ctx := NewWithFlags(&Flags{HeapCacheMaxBytes: -1})
+	require.Equal(t, churnWant(5), runChurn(t, ctx, 5))
+	freeLots(t, ctx)
+	require.Equal(t, 0, ctx.heapCacheBytes())
+	ctx.DestroyHeap()
+
+	var mu sync.Mutex
+	live := map[unsafe.Pointer]bool{}
+	ctx = NewWithFlags(&Flags{
+		HeapCacheMaxBytes: -1,
+		MallocHook:        func(p unsafe.Pointer, _ uint64) { mu.Lock(); live[p] = true; mu.Unlock() },
+		FreeHook:          func(p unsafe.Pointer) { mu.Lock(); delete(live, p); mu.Unlock() },
+		ReallocHook: func(p, np unsafe.Pointer, _ uint64) {
+			mu.Lock()
+			delete(live, p)
+			live[np] = true
+			mu.Unlock()
+		},
+	})
+	require.Equal(t, churnWant(5), runChurn(t, ctx, 5))
+	freeLots(t, ctx)
+	require.Equal(t, 0, ctx.heapCacheBytes())
+	ctx.DestroyHeap()
+	mu.Lock()
+	defer mu.Unlock()
+	delete(live, nil)
+	require.Empty(t, live)
 }
 
 // NewWithFlags without hooks creates the same cached heap New does.
@@ -146,6 +193,32 @@ func TestHeapCache_UnderTrackingHooks(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Empty(t, live, "everything allocated was freed when the heap went away")
+}
+
+// The heap's udata now carries the cache as well as the context id, which the
+// exec timeout check reads to find its Go context: it still does, whichever
+// way the heap was created.
+func TestHeapCache_TimeoutFindsItsContext(t *testing.T) {
+	hook := func(unsafe.Pointer, uint64) {}
+	cases := map[string]*Flags{
+		"cache":           {},
+		"no cache":        {HeapCacheMaxBytes: -1},
+		"hooks":           {MallocHook: hook},
+		"hooks, no cache": {MallocHook: hook, HeapCacheMaxBytes: -1},
+	}
+	for name, flags := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := NewWithFlags(flags)
+			defer ctx.DestroyHeap()
+			calls := 0
+			ctx.SetExecTimeoutCheckHandler(func(*Context) bool {
+				calls++
+				return calls > 3
+			})
+			err := ctx.PevalString(`while (true) {}`)
+			require.ErrorContains(t, err, "execution timeout")
+		})
+	}
 }
 
 // Heaps are created and destroyed over and over, each with its own cache.

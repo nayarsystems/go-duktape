@@ -5,14 +5,16 @@
 // hands a group of blocks back to the system as soon as the whole group is
 // free. When the blocks a script allocates and frees in one call happen to
 // fill and empty a group, every call pays an mmap, an munmap and the page
-// faults in between — measured at +60% per call on a bevents snippet, with
+// faults in between — measured at about +55% per call on a bevents snippet, with
 // the same instructions executed. Whether it happens depends on where the
 // heap's allocations fall, so any change to any script can turn it on or off.
 //
 // The cache keeps freed small blocks on per-size free lists instead of
 // returning them to malloc, so a call reuses what the previous one freed and
-// the groups never empty. It is bounded: past HEAP_CACHE_MAX_BYTES, freed
-// blocks go back to malloc as before.
+// the groups never empty. It is bounded: past its maximum (by default
+// HEAP_CACHE_DEFAULT_MAX_BYTES, see Flags.HeapCacheMaxBytes), freed blocks go
+// back to malloc as before. A heap can also be created without it, which
+// makes these functions plain malloc, realloc and free.
 //
 // Each block carries a header with its size class, since duktape's free does
 // not pass the size. Blocks larger than the biggest class are plain malloc
@@ -20,6 +22,7 @@
 // (go-duktape callers serialize on the context's lock), so the cache has no
 // lock of its own.
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "heap_cache.h"
@@ -27,7 +30,10 @@
 #define HEAP_CACHE_STEP 16
 #define HEAP_CACHE_CLASSES 64 /* classes of 16, 32, ... 1024 bytes */
 #define HEAP_CACHE_MAX_SIZE (HEAP_CACHE_STEP * HEAP_CACHE_CLASSES)
-#define HEAP_CACHE_MAX_BYTES (256 * 1024)
+// The bound counts the blocks' usable bytes (their size class), not their
+// headers nor malloc's own bookkeeping: the memory actually held is somewhat
+// more.
+#define HEAP_CACHE_DEFAULT_MAX_BYTES (256 * 1024)
 
 // The header keeps the payload aligned as malloc's own blocks are.
 // (max_align_t is C11; the package builds as C99, so the union spells out
@@ -47,16 +53,24 @@ typedef struct heapCacheFree {
 
 struct goHeapUdata {
 	uint32_t id;
+	int cached;
+	size_t maxBytes;
 	size_t cachedBytes;
 	heapCacheFree *lists[HEAP_CACHE_CLASSES];
 };
 
-goHeapUdata *goHeapUdataNew(uint32_t id) {
+goHeapUdata *goHeapUdataNew(uint32_t id, long maxBytes) {
 	goHeapUdata *u = calloc(1, sizeof(goHeapUdata));
 	if (u != NULL) {
 		u->id = id;
+		u->cached = maxBytes >= 0;
+		u->maxBytes = maxBytes > 0 ? (size_t)maxBytes : HEAP_CACHE_DEFAULT_MAX_BYTES;
 	}
 	return u;
+}
+
+int goHeapUdataCached(void *udata) {
+	return ((goHeapUdata *)udata)->cached;
 }
 
 uint32_t goHeapUdataId(void *udata) {
@@ -88,7 +102,13 @@ static size_t classSize(uint32_t cls) {
 
 void *goHeapCacheAlloc(void *udata, duk_size_t size) {
 	goHeapUdata *u = udata;
+	if (!u->cached) {
+		return malloc(size);
+	}
 	if (size > HEAP_CACHE_MAX_SIZE) {
+		if (size > SIZE_MAX - HDR) {
+			return NULL;
+		}
 		heapCacheHeader *h = malloc(HDR + size);
 		if (h == NULL) {
 			return NULL;
@@ -113,12 +133,16 @@ void *goHeapCacheAlloc(void *udata, duk_size_t size) {
 
 void goHeapCacheFree(void *udata, void *ptr) {
 	goHeapUdata *u = udata;
+	if (!u->cached) {
+		free(ptr);
+		return;
+	}
 	if (ptr == NULL) {
 		return;
 	}
 	heapCacheHeader *h = (heapCacheHeader *)((char *)ptr - HDR);
 	uint32_t cls = h->cls;
-	if (cls == 0 || u->cachedBytes + classSize(cls) > HEAP_CACHE_MAX_BYTES) {
+	if (cls == 0 || u->cachedBytes + classSize(cls) > u->maxBytes) {
 		free(h);
 		return;
 	}
@@ -129,6 +153,9 @@ void goHeapCacheFree(void *udata, void *ptr) {
 }
 
 void *goHeapCacheRealloc(void *udata, void *ptr, duk_size_t size) {
+	if (!((goHeapUdata *)udata)->cached) {
+		return realloc(ptr, size);
+	}
 	if (ptr == NULL) {
 		return goHeapCacheAlloc(udata, size);
 	}
@@ -139,6 +166,9 @@ void *goHeapCacheRealloc(void *udata, void *ptr, duk_size_t size) {
 	heapCacheHeader *h = (heapCacheHeader *)((char *)ptr - HDR);
 	if (h->cls == 0) {
 		// A plain block stays plain, whatever its new size.
+		if (size > SIZE_MAX - HDR) {
+			return NULL;
+		}
 		heapCacheHeader *nh = realloc(h, HDR + size);
 		if (nh == NULL) {
 			return NULL;

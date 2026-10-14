@@ -2,8 +2,9 @@
 
 Every duktape heap this package creates (`New`, and `NewWithFlags` with or
 without tracking hooks) allocates its memory through a small per-heap cache of
-freed blocks (`heap_cache.c`). This page explains why it exists, how it
-works, and how to check that it does its job.
+freed blocks (`heap_cache.c`), unless it is created with the cache disabled
+(see Tuning). This page explains why it exists, how it works, and how to
+check that it does its job.
 
 ## Why
 
@@ -57,13 +58,13 @@ costs no memory of its own.
 - **free(ptr)**: push the block onto its class's list, unless the cache is
   already at its bound (see below), in which case it goes back to `free`.
 - **realloc(ptr, size)**: if the new size still fits in the block's class,
-  return the same block (duktape grows strings and buffers by small steps, so
-  this is common); otherwise allocate a block of the new size, copy, and free
-  the old one through the cache.
+  return the same block, at no cost; otherwise allocate a block of the new
+  size, copy, and free the old one through the cache.
 
 Requests larger than 1024 bytes are not cached: they go straight to
-`malloc`/`realloc`/`free`, marked as such. Large blocks are rare and reusing
-them exactly is unlikely, and they are what mallocng handles well anyway.
+`malloc`/`realloc`/`free`, marked as such in their header. Caching them would
+need either many more classes or blocks much bigger than asked for, and the
+small blocks are where the per-call churn of a script is.
 
 ### The header
 
@@ -85,11 +86,15 @@ rounding on average, on a 100-byte block, is 23%).
 
 ### The bound
 
-Freed blocks are kept only while the cache holds at most **256 KB** per
-heap. Past that, freed blocks go back to `free` as without the cache. So a
-heap never sits on more than 256 KB of memory it is not using, and a script
-that frees a large amount at once (dropping a big object graph) still returns
-most of it.
+Freed blocks are kept only while the cache holds at most **256 KB** per heap
+(by default, see Tuning). Past that, freed blocks go back to `free` as
+without the cache, so a script that frees a large amount at once (dropping a
+big object graph) still returns most of it.
+
+The bound counts the blocks' usable bytes, their size class. Their headers,
+and the bookkeeping `malloc` keeps for each of them, are not counted, so the
+memory a heap actually holds on to is somewhat more than the bound: with
+16-byte headers and small blocks, up to about twice as much.
 
 The cache is emptied, and all its blocks freed, when the heap is destroyed
 (`DestroyHeap`).
@@ -132,15 +137,23 @@ calling into Go on each allocation.
   `C.CString`, which uses the C library's `malloc` directly, not the heap's
   memory functions. If an allocation pattern there ever triggers the same
   effect, the cache does not help.
-- **Memory given back early.** Up to 256 KB of freed blocks per heap stay
-  allocated until the heap is destroyed. A process with N heaps may hold up to
-  N × 256 KB more than without the cache.
+- **Memory it does not give back.** Freed blocks up to the bound stay
+  allocated until the heap is destroyed. A process with N heaps holds up to N
+  times the bound (plus headers, see The bound) more than it would without the
+  cache.
 
 ## Checking it
 
-Tests: `heap_cache_test.go` runs scripts that allocate, grow and free a lot
-and check their own results, and checks the cache's bound, its use under
-tracking hooks and the hooks' bookkeeping.
+Tests (`heap_cache_test.go`):
+
+- scripts that allocate, grow and free a lot, and check their own results;
+- the bound, the default one and one set with `Flags.HeapCacheMaxBytes`;
+- the cache disabled, with and without tracking hooks;
+- the cache under tracking hooks, and the hooks' bookkeeping (everything
+  allocated is freed by the time the heap is destroyed);
+- the exec timeout check still finding its context, with every way of
+  creating a heap (the context id now travels in the same `udata` as the
+  cache).
 
 To see the effect itself, run a benchmark of a script under a static musl
 build and look at page faults and memory syscalls:
@@ -155,6 +168,22 @@ calls, means the allocator is going back to the kernel on every call.
 
 ## Tuning
 
-The class step (16 bytes), the largest cached size (1024 bytes) and the bound
-(256 KB) are compile-time constants at the top of `heap_cache.c`
-(`HEAP_CACHE_STEP`, `HEAP_CACHE_CLASSES`, `HEAP_CACHE_MAX_BYTES`).
+The bound is set per heap with `Flags.HeapCacheMaxBytes`:
+
+| Value | Effect |
+|---|---|
+| `0` (the default, and what `New` uses) | bound of `DefaultHeapCacheMaxBytes` (256 KB) |
+| `> 0` | that bound, in bytes |
+| `< 0` | no cache: the heap allocates with plain `malloc`, as before the cache existed (no headers, no size classes) |
+
+```go
+ctx := duktape.NewWithFlags(&duktape.Flags{HeapCacheMaxBytes: 64 * 1024}) // smaller bound
+ctx := duktape.NewWithFlags(&duktape.Flags{HeapCacheMaxBytes: -1})        // no cache
+```
+
+Disabling it is meant for comparing and diagnosing, e.g. benchmarking a script
+with and without the cache from the same build.
+
+The class step (16 bytes) and the largest cached size (1024 bytes) are
+compile-time constants at the top of `heap_cache.c` (`HEAP_CACHE_STEP`,
+`HEAP_CACHE_CLASSES`): they are internal details, not tuning knobs.

@@ -82,7 +82,7 @@ func new(createDukContext func(d *Context), flags *Flags) *Context {
 // See: http://duktape.org/api.html#duk_create_heap_default
 func New() *Context {
 	return new(func(d *Context) {
-		d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId))
+		d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId), 0)
 	}, &Flags{})
 }
 
@@ -95,8 +95,9 @@ func New() *Context {
 // (see heap_cache.c).
 func NewWithFlags(flags *Flags) *Context {
 	return new(func(d *Context) {
+		cacheMaxBytes := C.long(flags.HeapCacheMaxBytes)
 		if flags.MallocHook == nil && flags.FreeHook == nil && flags.ReallocHook == nil {
-			d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId))
+			d.duk_context = C.goWrapperDukCreateHeap(C.uint32_t(d.dukCtxId), cacheMaxBytes)
 			return
 		}
 		if flags.MallocHook != nil {
@@ -110,7 +111,7 @@ func NewWithFlags(flags *Flags) *Context {
 				flags.ReallocHook(ptr, nptr, uint64(size))
 			}
 		}
-		d.duk_context = C.goWrapperDukCreateHeapWithHooks(C.uint32_t(d.dukCtxId))
+		d.duk_context = C.goWrapperDukCreateHeapWithHooks(C.uint32_t(d.dukCtxId), cacheMaxBytes)
 	}, flags)
 }
 
@@ -128,7 +129,17 @@ type Flags struct {
 	MallocHook  func(unsafe.Pointer, uint64)
 	FreeHook    func(unsafe.Pointer)
 	ReallocHook func(unsafe.Pointer, unsafe.Pointer, uint64)
+
+	// HeapCacheMaxBytes bounds the heap's cache of freed blocks (see
+	// HEAP_CACHE.md): 0 uses the default (DefaultHeapCacheMaxBytes); a
+	// negative value disables the cache, and the heap allocates with plain
+	// malloc, as before the cache existed.
+	HeapCacheMaxBytes int
 }
+
+// DefaultHeapCacheMaxBytes is the bound of a heap's block cache when
+// Flags.HeapCacheMaxBytes is 0 (HEAP_CACHE_DEFAULT_MAX_BYTES in heap_cache.c).
+const DefaultHeapCacheMaxBytes = 256 * 1024
 
 // FlagConsoleProxyWrapper is a Console flag.
 // Use a proxy wrapper to make undefined methods (console.foo()) no-ops.

@@ -13,8 +13,8 @@ extern void goTrackFree(uint32_t ctxId, void *ptr);
 
 duk_bool_t goWrapperExecTimeoutCheck(void *userData);
 void goWrapperFatalErrorHandler(void *userData, const char *msg);
-duk_context *goWrapperDukCreateHeap(uint32_t id);
-duk_context *goWrapperDukCreateHeapWithHooks(uint32_t id);
+duk_context *goWrapperDukCreateHeap(uint32_t id, long cacheMaxBytes);
+duk_context *goWrapperDukCreateHeapWithHooks(uint32_t id, long cacheMaxBytes);
 void goWrapperDukDestroyHeap(duk_context *ctx);
 size_t goWrapperDukHeapCacheBytes(duk_context *ctx);
 
