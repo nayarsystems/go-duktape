@@ -183,6 +183,10 @@ nix develop .#musl --command go test -c -o heapcache.test \
 benchstat -col /cache bench.txt
 ```
 
+`benchstat` comes with every shell of the flake (`nix develop .#musl
+--command benchstat …`, or from inside the shell); outside them, it installs
+with `go install golang.org/x/perf/cmd/benchstat@latest`.
+
 `benchstat` scales each row of the `faults/kop` table to its smallest value,
 so a row like 35,000 → 2 shows as `35000.000` → `2.000`, and 3,000 → 0.4 as
 `3082000.0m` → `400.0m` (m being thousandths). `benchstat -format csv` prints
