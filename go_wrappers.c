@@ -32,9 +32,6 @@ duk_context *goWrapperDukCreateHeap(uint32_t id, long cacheMaxBytes) {
   return ctx;
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wuse-after-free"
-
 // The tracking hooks sit on top of the block cache, so a tracked heap
 // allocates exactly as an untracked one does, and the hooks see what duktape
 // allocates and frees (blocks kept in the cache count as freed).
@@ -54,8 +51,6 @@ static void trackedFree(void *userData, void *ptr) {
   goHeapCacheFree(userData, ptr);
   goTrackFree(goHeapUdataId(userData), ptr);
 }
-
-#pragma GCC diagnostic pop
 
 duk_context *goWrapperDukCreateHeapWithHooks(uint32_t id, long cacheMaxBytes) {
   goHeapUdata *u = goHeapUdataNew(id, cacheMaxBytes);
